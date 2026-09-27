@@ -1,8 +1,16 @@
 const app = document.querySelector("#app");
 let draft = { sites: ["youtube.com", "reddit.com", "x.com"], allowanceMinutes: 30, cooldownHours: 8 };
+let groups = [];
+let selectedGroupId = null;
 const labels = { "youtube.com": "YouTube", "reddit.com": "Reddit", "x.com": "X" };
+const groupTemplates = [
+  { id: "social", name: "Social", icon: "#", sites: ["reddit.com", "x.com", "instagram.com", "facebook.com"] },
+  { id: "video", name: "Video", icon: "▶", sites: ["youtube.com", "tiktok.com", "twitch.tv"] },
+  { id: "news", name: "News", icon: "▤", sites: ["reuters.com", "bbc.com", "cnn.com"] }
+];
 const fmt = (ms) => `${Math.ceil(ms / 60_000)} min`;
 const esc = (value) => value.replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+const brandMarkup = () => `<div class="brand"><img src="assets/logo-a.svg" alt=""><span>Boom<span class="dot">.</span></span></div>`;
 let view = "loading";
 let draftRevision = 0;
 let saveQueue = Promise.resolve();
@@ -44,8 +52,61 @@ function addSite(site) {
   return true;
 }
 
+function groupId() { return `group-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+function uniqueGroupName(base) {
+  const existing = new Set(groups.map(group => group.name));
+  if (!existing.has(base)) return base;
+  let index = 2;
+  while (existing.has(`${base} ${index}`)) index += 1;
+  return `${base} ${index}`;
+}
+function loadSelectedGroup() {
+  const group = groups.find(item => item.id === selectedGroupId) || groups[0];
+  if (!group) return;
+  selectedGroupId = group.id;
+  draft = { sites: [...group.sites], allowanceMinutes: group.allowanceMinutes, cooldownHours: group.cooldownHours };
+}
+function hydrateGroups(state) {
+  if (Array.isArray(state.groups) && state.groups.length) {
+    groups = state.groups.map(group => ({
+      id: group.id,
+      name: group.name,
+      sites: [...group.sites],
+      allowanceMinutes: group.allowanceMinutes ?? 30,
+      cooldownHours: group.cooldownHours ?? 8
+    }));
+    selectedGroupId = groups.some(group => group.id === state.selectedGroupId) ? state.selectedGroupId : groups[0].id;
+  } else {
+    selectedGroupId = "group-default";
+    groups = [{ id: selectedGroupId, name: "Focus group", sites: [...state.sites], allowanceMinutes: state.allowanceMinutes, cooldownHours: state.cooldownHours }];
+  }
+  loadSelectedGroup();
+}
+function createGroupFromTemplate(template) {
+  const group = {
+    id: groupId(),
+    name: uniqueGroupName(template.name),
+    sites: [...template.sites],
+    allowanceMinutes: 30,
+    cooldownHours: 8
+  };
+  groups.push(group);
+  selectedGroupId = group.id;
+  loadSelectedGroup();
+  draftRevision += 1;
+  void persistDraft();
+  renderStart();
+}
+
 function persistDraft() {
-  const snapshot = { sites: [...draft.sites], allowanceMinutes: draft.allowanceMinutes, cooldownHours: draft.cooldownHours };
+  groups = groups.map(group => group.id === selectedGroupId ? { ...group, sites: [...draft.sites], allowanceMinutes: draft.allowanceMinutes, cooldownHours: draft.cooldownHours } : group);
+  const snapshot = {
+    groups: structuredClone(groups),
+    selectedGroupId,
+    sites: [...draft.sites],
+    allowanceMinutes: draft.allowanceMinutes,
+    cooldownHours: draft.cooldownHours
+  };
   saveQueue = saveQueue.then(() => chrome.storage.local.set(snapshot));
   return saveQueue;
 }
@@ -64,9 +125,10 @@ function renderStart() {
   const totalCooldownMinutes = Math.max(1, Math.round(draft.cooldownHours * 60));
   const customHours = Math.floor(totalCooldownMinutes / 60);
   const customMinutes = totalCooldownMinutes % 60;
-  app.innerHTML = `<div class="brand">Boom<span class="dot">.</span></div>
+  app.innerHTML = `${brandMarkup()}
+    <label class="group-switch"><span>Active group</span><select id="group-select">${groups.map(group => `<option value="${esc(group.id)}" ${group.id===selectedGroupId?"selected":""}>${esc(group.name)}</option>`).join("")}</select></label>
     <h2>Sites in the group</h2><p class="group-copy">One shared allowance for all of them.</p>
-    <div class="site-list">${draft.sites.map(site => `<span class="site-pill">${esc(labels[site] || site)}<button data-remove="${esc(site)}" aria-label="Remove ${esc(site)}">×</button></span>`).join("") || `<span class="empty">No sites added yet</span>`}</div>
+    <div class="site-list">${draft.sites.map(site => `<span class="site-pill"><span>${esc(labels[site] || site)}</span><button class="site-only" data-only="${esc(site)}" aria-label="Use only ${esc(site)}">Only</button><button class="site-remove" data-remove="${esc(site)}" aria-label="Remove ${esc(site)}">×</button></span>`).join("") || `<span class="empty">No sites added yet</span>`}</div>
     <button class="add-group" id="add">＋ Add sites to group</button>
     <h2 class="time-title">How much time?</h2>
     <div class="stepper"><button class="round" id="minus" aria-label="Subtract 5 minutes">−</button><label class="minute-input"><input id="minutes" type="number" min="1" max="1440" step="1" value="${draft.allowanceMinutes}" aria-label="Allowance in minutes"><span>min</span></label><button class="round" id="plus" aria-label="Add 5 minutes">+</button></div>
@@ -76,6 +138,15 @@ function renderStart() {
     <button class="primary" id="start">Start ${draft.allowanceMinutes}-minute allowance</button>
     <p class="foot">When it reaches 0, these sites lock.</p>`;
   document.querySelectorAll("[data-remove]").forEach(button => button.onclick = () => changeDraft(() => { draft.sites = draft.sites.filter(site => site !== button.dataset.remove); }));
+  document.querySelectorAll("[data-only]").forEach(button => button.onclick = () => changeDraft(() => { draft.sites = [button.dataset.only]; }));
+  document.querySelector("#group-select").onchange = async event => {
+    await persistDraft();
+    selectedGroupId = event.target.value;
+    loadSelectedGroup();
+    draftRevision += 1;
+    await chrome.storage.local.set({ selectedGroupId });
+    renderStart();
+  };
   document.querySelector("#add").onclick = renderAddSites;
   document.querySelector("#minus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.max(1, draft.allowanceMinutes - 5); });
   document.querySelector("#plus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.min(1440, draft.allowanceMinutes + 5); });
@@ -136,16 +207,32 @@ function renderAddSites() {
   app.innerHTML = `<button class="back" id="back">←</button>
     <div class="brand small">Add sites</div>
     <p class="add-intro">Choose how you want to add a site to this group.</p>
+    <section class="template-section"><div class="template-heading"><strong>Create a template group</strong><span>Start a new group with common sites.</span></div><div class="template-grid">${groupTemplates.map(template => `<button class="template-card" data-template="${template.id}"><span>${template.icon}</span><strong>${template.name}</strong><small>${template.sites.length} sites</small></button>`).join("")}</div></section>
+    <div class="or"><span>add to ${esc(groups.find(group => group.id === selectedGroupId)?.name || "this group")}</span></div>
     <button class="choice" id="current"><span class="choice-icon">◎</span><span><strong>Add current site</strong><small>Use the website open in this tab</small></span><span>›</span></button>
+    <button class="choice only-current" id="only-current"><span class="choice-icon">1</span><span><strong>Only current site</strong><small>Replace this group’s sites with the open website</small></span><span>›</span></button>
     <div class="or"><span>or</span></div>
     <form class="manual" id="manual"><label for="website">Enter a website</label><div class="input-row"><input id="website" type="text" inputmode="url" placeholder="example.com" autocomplete="off"><button type="submit">Add</button></div><p class="error" id="error" role="alert"></p></form>
     <div class="current-group">${draft.sites.length} site${draft.sites.length === 1 ? "" : "s"} currently in this group</div>`;
   document.querySelector("#back").onclick = renderStart;
+  document.querySelectorAll("[data-template]").forEach(button => button.onclick = () => {
+    const template = groupTemplates.find(item => item.id === button.dataset.template);
+    if (template) createGroupFromTemplate(template);
+  });
   document.querySelector("#current").onclick = async () => {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const site = normalizeSite(tab?.url || "");
     if (!site) return showError("Open a normal website first, then try again.");
     addSite(site);
+    renderStart();
+  };
+  document.querySelector("#only-current").onclick = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const site = normalizeSite(tab?.url || "");
+    if (!site) return showError("Open a normal website first, then try again.");
+    draft.sites = [site];
+    draftRevision += 1;
+    await persistDraft();
     renderStart();
   };
   document.querySelector("#manual").onsubmit = event => {
@@ -158,15 +245,16 @@ function renderAddSites() {
 }
 
 function showError(message) { document.querySelector("#error").textContent = message; }
-function renderActive(state) { view = "active"; app.innerHTML = `<div class="brand">Boom<span class="dot">.</span></div><div class="active"><p>Shared allowance for ${state.sites.map(site => esc(labels[site] || site)).join(", ")}</p><div class="ring"><strong>${fmt(state.remainingMs)}</strong><span>left</span></div><h2 class="center">Stay intentional.</h2><p class="status">Your selected sites lock when the timer reaches zero.</p></div>`; }
-function renderLocked(state) { view = "locked"; const left=Math.max(0,state.lockedUntil-Date.now()); const hours=Math.floor(left/3_600_000), mins=Math.ceil((left%3_600_000)/60_000); app.innerHTML=`<div class="brand">Boom<span class="dot">.</span></div><div class="locked"><div class="lock">🔒</div><h2>Time’s up.</h2><p>Your sites are locked.</p><p>Reset becomes available when the cooldown ends.</p><button class="disabled" disabled>Reactivate in ${hours}h ${mins}m</button></div>`; }
+function renderActive(state) { view = "active"; app.innerHTML = `${brandMarkup()}<div class="active"><p>Shared allowance for ${state.sites.map(site => esc(labels[site] || site)).join(", ")}</p><div class="ring"><strong>${fmt(state.remainingMs)}</strong><span>left</span></div><h2 class="center">Stay intentional.</h2><p class="status">Your selected sites lock when the timer reaches zero.</p></div>`; }
+function renderLocked(state) { view = "locked"; const left=Math.max(0,state.lockedUntil-Date.now()); const hours=Math.floor(left/3_600_000), mins=Math.ceil((left%3_600_000)/60_000); app.innerHTML=`${brandMarkup()}<div class="locked"><img class="locked-mark" src="assets/logo-a.svg" alt=""><h2>Time’s up.</h2><p>Your sites are locked.</p><p>Reset becomes available when the cooldown ends.</p><button class="disabled" disabled>Reactivate in ${hours}h ${mins}m</button></div>`; }
 async function refresh() {
   const revisionAtRequest = draftRevision;
   const state = await chrome.runtime.sendMessage({ type: "state" });
   if (state.isLocked) return renderLocked(state);
   if (state.startedAt) return renderActive(state);
   if (draftRevision !== revisionAtRequest || view === "add-sites") return;
-  draft = { sites: state.sites, allowanceMinutes: state.allowanceMinutes, cooldownHours: state.cooldownHours };
+  hydrateGroups(state);
+  await persistDraft();
   renderStart();
 }
 refresh();

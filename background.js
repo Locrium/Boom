@@ -1,8 +1,10 @@
 const RULE_ID_BASE = 7100;
-const TICK_ALARM = "usage-tick";
 const UNLOCK_ALARM = "unlock";
+const HEARTBEAT_SCRIPT = "boom-limited-sites-heartbeat";
 const DEFAULT_STATE = {
   sites: ["youtube.com", "reddit.com", "x.com"],
+  groups: null,
+  selectedGroupId: null,
   allowanceMinutes: 30,
   cooldownHours: 8,
   startedAt: null,
@@ -51,6 +53,24 @@ async function updateRules(state) {
   await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
 }
 
+async function syncHeartbeatScript(sites = []) {
+  await chrome.scripting.unregisterContentScripts({ ids: [HEARTBEAT_SCRIPT] }).catch(() => null);
+  if (!sites.length) return;
+  const matches = [...new Set(sites.map((site) => `*://*.${site}/*`))];
+  await chrome.scripting.registerContentScripts([{
+    id: HEARTBEAT_SCRIPT,
+    matches,
+    js: ["heartbeat.js"],
+    runAt: "document_start",
+    persistAcrossSessions: true
+  }]);
+}
+
+async function ensureHeartbeatInTab(tab) {
+  if (!tab?.id || !tab.url || !isLimited(tab.url, (await read()).sites)) return;
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["heartbeat.js"] }).catch(() => null);
+}
+
 async function unlock(state) {
   const next = {
     ...state,
@@ -63,7 +83,7 @@ async function unlock(state) {
   await save(next);
   await updateRules(next);
   await chrome.alarms.clear(UNLOCK_ALARM);
-  await chrome.alarms.clear(TICK_ALARM);
+  await syncHeartbeatScript();
   return next;
 }
 
@@ -90,7 +110,7 @@ async function lock(state) {
   };
   await save(next);
   await updateRules(next);
-  await chrome.alarms.clear(TICK_ALARM);
+  await syncHeartbeatScript();
   chrome.alarms.create(UNLOCK_ALARM, { when: lockedUntil });
   await redirectLimitedTabs(next);
   return next;
@@ -121,6 +141,7 @@ async function setActiveTab(tabId) {
     : null;
   state = { ...state, activeTabId: tabId, activeSince };
   await save(state);
+  if (activeSince) await ensureHeartbeatInTab(tab);
   return state;
 }
 
@@ -130,7 +151,9 @@ async function restoreRuntime() {
   if (state.isLocked) {
     chrome.alarms.create(UNLOCK_ALARM, { when: state.lockedUntil });
   } else if (state.startedAt) {
-    chrome.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
+    await syncHeartbeatScript(state.sites);
+  } else {
+    await syncHeartbeatScript();
   }
   return state;
 }
@@ -166,8 +189,6 @@ chrome.alarms.onAlarm.addListener((alarm) => enqueue(async () => {
   let state = await read();
   if (alarm.name === UNLOCK_ALARM) {
     await reconcileExpiry(state);
-  } else if (alarm.name === TICK_ALARM) {
-    await consume(state);
   }
 }));
 
@@ -192,7 +213,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.activeTabId = tab?.id ?? null;
       state.activeSince = tab && isLimited(tab.url, state.sites) ? Date.now() : null;
       await save(state);
-      chrome.alarms.create(TICK_ALARM, { periodInMinutes: 0.5 });
+      await syncHeartbeatScript(state.sites);
+      const limitedTabs = (await chrome.tabs.query({})).filter((openTab) => isLimited(openTab.url, state.sites));
+      await Promise.all(limitedTabs.map(ensureHeartbeatInTab));
     }
     sendResponse({ ...state, remainingMs: remainingMs(state) });
   }).catch((error) => sendResponse({ error: error.message }));

@@ -3,17 +3,23 @@
   "name": "Boom — Focus Budget",
   "version": "0.1.0",
   "description": "Give distracting sites one shared time budget, then lock them for a while.",
-  "permissions": ["storage", "tabs", "alarms", "declarativeNetRequest"],
+  "permissions": ["storage", "tabs", "alarms", "scripting", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Boom", "default_popup": "popup.html" },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["heartbeat.js"],
-      "run_at": "document_start"
+  "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "action": {
+    "default_title": "Boom",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "32": "assets/icon-32.png"
     }
-  ],
+  },
   "web_accessible_resources": [
     { "resources": ["locked.html"], "matches": ["<all_urls>"] }
   ]

@@ -6,6 +6,7 @@ let now = 1_000_000;
 let storage = {};
 let rules = [];
 const alarms = new Map();
+const registeredScripts = new Map();
 const tabs = new Map([
   [1, { id: 1, active: true, windowId: 1, url: "https://youtube.com/watch?v=test" }],
   [2, { id: 2, active: false, windowId: 1, url: "https://example.com" }]
@@ -26,6 +27,11 @@ const chrome = {
     async updateDynamicRules({ removeRuleIds = [], addRules = [] }) {
       rules = rules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(structuredClone(addRules));
     }
+  },
+  scripting: {
+    async unregisterContentScripts({ ids }) { ids.forEach((id) => registeredScripts.delete(id)); },
+    async registerContentScripts(scripts) { scripts.forEach((script) => registeredScripts.set(script.id, structuredClone(script))); },
+    async executeScript() {}
   },
   alarms: {
     create(name, info) { alarms.set(name, structuredClone(info)); },
@@ -66,7 +72,8 @@ function message(payload, sender = {}) {
   await listeners.installed();
   let state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 2 });
   assert.equal(state.remainingMs, 60_000, "allowance starts with the requested time");
-  assert.equal(alarms.has("usage-tick"), true, "a fallback usage alarm is scheduled");
+  assert.equal(registeredScripts.has("boom-limited-sites-heartbeat"), true, "heartbeat is registered for limited sites");
+  assert.deepEqual(registeredScripts.get("boom-limited-sites-heartbeat").matches, ["*://*.youtube.com/*"]);
 
   now += 60_001;
   state = await message({ type: "heartbeat" }, { tab: { id: 1 } });
@@ -82,6 +89,7 @@ function message(payload, sender = {}) {
   assert.equal(state.startedAt, null, "a new allowance can be started after cooldown");
   assert.equal(rules.length, 0, "blocking rules are removed after cooldown");
   assert.equal(alarms.has("unlock"), false, "stale unlock alarm is cleared");
+  assert.equal(registeredScripts.size, 0, "heartbeat script is removed after the cooldown");
 
   tabs.set(1, { id: 1, active: true, windowId: 1, url: "https://youtube.com" });
   state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 1 });
