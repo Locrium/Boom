@@ -1,0 +1,179 @@
+const app = document.querySelector("#app");
+let draft = { sites: ["youtube.com", "reddit.com", "x.com"], allowanceMinutes: 30, cooldownHours: 8 };
+const labels = { "youtube.com": "YouTube", "reddit.com": "Reddit", "x.com": "X" };
+const fmt = (ms) => `${Math.ceil(ms / 60_000)} min`;
+const esc = (value) => value.replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+let view = "loading";
+let draftRevision = 0;
+let saveQueue = Promise.resolve();
+let themeMode = "system";
+
+function applyTheme(mode) {
+  themeMode = ["system", "light", "dark"].includes(mode) ? mode : "system";
+  if (themeMode === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = themeMode;
+  document.querySelector("#theme-icon").textContent = themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐";
+  document.querySelectorAll("[data-theme-choice]").forEach(button => button.classList.toggle("selected", button.dataset.themeChoice === themeMode));
+}
+
+chrome.storage.local.get({ themeMode: "system" }).then(({ themeMode: savedTheme }) => applyTheme(savedTheme));
+document.querySelector("#theme-trigger").onclick = () => document.querySelector("#theme-dialog").showModal();
+document.querySelector("#theme-close").onclick = () => document.querySelector("#theme-dialog").close();
+document.querySelector("#theme-dialog").onclick = (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); };
+document.querySelectorAll("[data-theme-choice]").forEach(button => button.onclick = async () => {
+  applyTheme(button.dataset.themeChoice);
+  await chrome.storage.local.set({ themeMode });
+  document.querySelector("#theme-dialog").close();
+});
+
+function normalizeSite(value) {
+  const raw = value.trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    if (!url.hostname || !url.hostname.includes(".")) return null;
+    return url.hostname.replace(/^www\./, "");
+  } catch { return null; }
+}
+
+function addSite(site) {
+  if (!site || draft.sites.includes(site)) return false;
+  draft.sites.push(site);
+  draftRevision += 1;
+  void persistDraft();
+  return true;
+}
+
+function persistDraft() {
+  const snapshot = { sites: [...draft.sites], allowanceMinutes: draft.allowanceMinutes, cooldownHours: draft.cooldownHours };
+  saveQueue = saveQueue.then(() => chrome.storage.local.set(snapshot));
+  return saveQueue;
+}
+
+function changeDraft(change) {
+  change();
+  draftRevision += 1;
+  void persistDraft();
+  renderStart();
+}
+
+function renderStart() {
+  view = "setup";
+  const cooldownPresets = [1, 2, 4, 8, 12, 24];
+  const isCustomCooldown = !cooldownPresets.includes(draft.cooldownHours);
+  const totalCooldownMinutes = Math.max(1, Math.round(draft.cooldownHours * 60));
+  const customHours = Math.floor(totalCooldownMinutes / 60);
+  const customMinutes = totalCooldownMinutes % 60;
+  app.innerHTML = `<div class="brand">Boom<span class="dot">.</span></div>
+    <h2>Sites in the group</h2><p class="group-copy">One shared allowance for all of them.</p>
+    <div class="site-list">${draft.sites.map(site => `<span class="site-pill">${esc(labels[site] || site)}<button data-remove="${esc(site)}" aria-label="Remove ${esc(site)}">×</button></span>`).join("") || `<span class="empty">No sites added yet</span>`}</div>
+    <button class="add-group" id="add">＋ Add sites to group</button>
+    <h2 class="time-title">How much time?</h2>
+    <div class="stepper"><button class="round" id="minus" aria-label="Subtract 5 minutes">−</button><label class="minute-input"><input id="minutes" type="number" min="1" max="1440" step="1" value="${draft.allowanceMinutes}" aria-label="Allowance in minutes"><span>min</span></label><button class="round" id="plus" aria-label="Add 5 minutes">+</button></div>
+    <p class="hint">Shared across all selected sites.</p>
+    <div class="cooldown"><label>Reset becomes available after</label><select id="cooldown">${cooldownPresets.map(n=>`<option value="${n}" ${n===draft.cooldownHours?"selected":""}>${n} hours</option>`).join("")}<option value="custom" ${isCustomCooldown?"selected":""}>Custom…</option></select></div>
+    <div class="custom-cooldown ${isCustomCooldown?"visible":""}" id="custom-cooldown"><div class="custom-title"><strong>Custom reset time</strong><span>Choose exactly how long sites stay locked.</span></div><div class="duration-fields"><label><span>Hours</span><input id="custom-hours" type="number" min="0" max="168" step="1" value="${customHours}"></label><label><span>Minutes</span><input id="custom-minutes" type="number" min="0" max="59" step="1" value="${customMinutes}"></label></div><p class="duration-error" id="duration-error"></p></div>
+    <button class="primary" id="start">Start ${draft.allowanceMinutes}-minute allowance</button>
+    <p class="foot">When it reaches 0, these sites lock.</p>`;
+  document.querySelectorAll("[data-remove]").forEach(button => button.onclick = () => changeDraft(() => { draft.sites = draft.sites.filter(site => site !== button.dataset.remove); }));
+  document.querySelector("#add").onclick = renderAddSites;
+  document.querySelector("#minus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.max(1, draft.allowanceMinutes - 5); });
+  document.querySelector("#plus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.min(1440, draft.allowanceMinutes + 5); });
+  const minutesInput = document.querySelector("#minutes");
+  const commitMinutes = () => {
+    const parsed = Number.parseInt(minutesInput.value, 10);
+    if (!Number.isFinite(parsed)) { minutesInput.value = draft.allowanceMinutes; return; }
+    const next = Math.min(1440, Math.max(1, parsed));
+    draft.allowanceMinutes = next;
+    minutesInput.value = next;
+    document.querySelector("#start").textContent = `Start ${next}-minute allowance`;
+    draftRevision += 1;
+    void persistDraft();
+  };
+  minutesInput.onchange = commitMinutes;
+  minutesInput.onblur = commitMinutes;
+  minutesInput.onkeydown = event => { if (event.key === "Enter") { commitMinutes(); minutesInput.blur(); } };
+  const cooldownSelect = document.querySelector("#cooldown");
+  const customPanel = document.querySelector("#custom-cooldown");
+  cooldownSelect.onchange = event => {
+    if (event.target.value === "custom") {
+      customPanel.classList.add("visible");
+      document.querySelector("#custom-hours").focus();
+      return;
+    }
+    customPanel.classList.remove("visible");
+    draft.cooldownHours = Number(event.target.value);
+    draftRevision += 1;
+    void persistDraft();
+  };
+  const commitCustomCooldown = () => {
+    const hoursInput = document.querySelector("#custom-hours");
+    const minutesInput = document.querySelector("#custom-minutes");
+    const hours = Math.min(168, Math.max(0, Number.parseInt(hoursInput.value || "0", 10)));
+    const minutes = Math.min(59, Math.max(0, Number.parseInt(minutesInput.value || "0", 10)));
+    if (hours === 0 && minutes === 0) {
+      document.querySelector("#duration-error").textContent = "Choose at least 1 minute.";
+      return;
+    }
+    hoursInput.value = hours;
+    minutesInput.value = minutes;
+    document.querySelector("#duration-error").textContent = "";
+    draft.cooldownHours = hours + minutes / 60;
+    draftRevision += 1;
+    void persistDraft();
+  };
+  document.querySelector("#custom-hours").onchange = commitCustomCooldown;
+  document.querySelector("#custom-minutes").onchange = commitCustomCooldown;
+  document.querySelector("#start").onclick = async () => {
+    if (!draft.sites.length) return alert("Add at least one site to the group.");
+    await chrome.runtime.sendMessage({ type: "start", ...draft });
+    refresh();
+  };
+}
+
+function renderAddSites() {
+  view = "add-sites";
+  app.innerHTML = `<button class="back" id="back">←</button>
+    <div class="brand small">Add sites</div>
+    <p class="add-intro">Choose how you want to add a site to this group.</p>
+    <button class="choice" id="current"><span class="choice-icon">◎</span><span><strong>Add current site</strong><small>Use the website open in this tab</small></span><span>›</span></button>
+    <div class="or"><span>or</span></div>
+    <form class="manual" id="manual"><label for="website">Enter a website</label><div class="input-row"><input id="website" type="text" inputmode="url" placeholder="example.com" autocomplete="off"><button type="submit">Add</button></div><p class="error" id="error" role="alert"></p></form>
+    <div class="current-group">${draft.sites.length} site${draft.sites.length === 1 ? "" : "s"} currently in this group</div>`;
+  document.querySelector("#back").onclick = renderStart;
+  document.querySelector("#current").onclick = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const site = normalizeSite(tab?.url || "");
+    if (!site) return showError("Open a normal website first, then try again.");
+    addSite(site);
+    renderStart();
+  };
+  document.querySelector("#manual").onsubmit = event => {
+    event.preventDefault();
+    const site = normalizeSite(document.querySelector("#website").value);
+    if (!site) return showError("Enter a website like example.com.");
+    addSite(site);
+    renderStart();
+  };
+}
+
+function showError(message) { document.querySelector("#error").textContent = message; }
+function renderActive(state) { view = "active"; app.innerHTML = `<div class="brand">Boom<span class="dot">.</span></div><div class="active"><p>Shared allowance for ${state.sites.map(site => esc(labels[site] || site)).join(", ")}</p><div class="ring"><strong>${fmt(state.remainingMs)}</strong><span>left</span></div><h2 class="center">Stay intentional.</h2><p class="status">Your selected sites lock when the timer reaches zero.</p></div>`; }
+function renderLocked(state) { view = "locked"; const left=Math.max(0,state.lockedUntil-Date.now()); const hours=Math.floor(left/3_600_000), mins=Math.ceil((left%3_600_000)/60_000); app.innerHTML=`<div class="brand">Boom<span class="dot">.</span></div><div class="locked"><div class="lock">🔒</div><h2>Time’s up.</h2><p>Your sites are locked.</p><p>Reset becomes available when the cooldown ends.</p><button class="disabled" disabled>Reactivate in ${hours}h ${mins}m</button></div>`; }
+async function refresh() {
+  const revisionAtRequest = draftRevision;
+  const state = await chrome.runtime.sendMessage({ type: "state" });
+  if (state.isLocked) return renderLocked(state);
+  if (state.startedAt) return renderActive(state);
+  if (draftRevision !== revisionAtRequest || view === "add-sites") return;
+  draft = { sites: state.sites, allowanceMinutes: state.allowanceMinutes, cooldownHours: state.cooldownHours };
+  renderStart();
+}
+refresh();
+setInterval(async () => {
+  if (view !== "active" && view !== "locked") return;
+  const state = await chrome.runtime.sendMessage({ type: "state" });
+  if (state.isLocked) renderLocked(state);
+  else if (state.startedAt) renderActive(state);
+  else refresh();
+}, 5000);
