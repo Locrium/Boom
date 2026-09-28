@@ -124,5 +124,14 @@ function message(payload, sender = {}) {
   assert.equal(state.startedAt, null, "a new allowance can start after cooldown");
   assert.equal(rules.length, 0, "blocking rule is removed after cooldown");
 
+  await chrome.storage.local.set({ allowEarlyUnlock: true });
+  tabs.set(1, { id: 1, active: true, windowId: 1, url: "https://youtube.com" });
+  state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 0, allowanceSeconds: 5, cooldownHours: 1 });
+  assert.equal(state.remainingMs, 5_000, "a seconds-only allowance starts precisely");
+  now += 5_001;
+  await listeners.alarm({ name: "budget-expiry" });
+  state = await message({ type: "state" });
+  assert.equal(state.isLocked, true, "a seconds-only allowance locks at its exact expiry");
+
   console.log("PASS: event-driven timing, focused usage, blocking, cooldown, and optional early unlock");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

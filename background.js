@@ -7,6 +7,7 @@ const DEFAULT_STATE = {
   groups: null,
   selectedGroupId: null,
   allowanceMinutes: 30,
+  allowanceSeconds: null,
   cooldownHours: 8,
   allowEarlyUnlock: true,
   startedAt: null,
@@ -43,7 +44,14 @@ function isLimited(url, sites) {
 }
 
 function remainingMs(state) {
-  return Math.max(0, state.allowanceMinutes * 60_000 - state.usedMs);
+  const totalMs = Number.isFinite(state.allowanceSeconds)
+    ? state.allowanceSeconds * 1000
+    : state.allowanceMinutes * 60_000;
+  return Math.max(0, totalMs - state.usedMs);
+}
+
+function allowanceMs(state) {
+  return Number.isFinite(state.allowanceSeconds) ? state.allowanceSeconds * 1000 : state.allowanceMinutes * 60_000;
 }
 
 async function updateRules(state) {
@@ -92,7 +100,7 @@ async function redirectLimitedTabs(state) {
 
 async function lock(state) {
   const lockedUntil = Date.now() + state.cooldownHours * 3_600_000;
-  const next = { ...state, usedMs: state.allowanceMinutes * 60_000, isLocked: true, lockedUntil };
+  const next = { ...state, usedMs: allowanceMs(state), isLocked: true, lockedUntil };
   await save(next);
   await saveRuntime({ activeTabId: null, activeSince: null, windowFocused: true });
   await chrome.alarms.clear(BUDGET_ALARM);
@@ -201,6 +209,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ...state,
         sites: [...new Set(message.sites)],
         allowanceMinutes: message.allowanceMinutes,
+        allowanceSeconds: message.allowanceSeconds ?? null,
         cooldownHours: message.cooldownHours,
         startedAt: Date.now(),
         usedMs: 0,

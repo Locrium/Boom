@@ -12,7 +12,7 @@ A deliberately small Chrome extension: choose a group of sites, give the group o
 ## MVP behavior
 
 - Counts only time on the focused, active tab.
-- A 30-minute allowance is shared across every selected domain and its subdomains.
+- A minute-based allowance, optionally fine-tuned to the second, is shared across every selected domain and its subdomains.
 - When time is exhausted, selected sites are locked for the chosen cooldown.
 - The extension automatically unlocks and clears the allowance when the cooldown ends.
 

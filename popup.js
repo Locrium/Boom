@@ -1,5 +1,5 @@
 const app = document.querySelector("#app");
-let draft = { sites: ["youtube.com", "reddit.com", "x.com"], allowanceMinutes: 30, cooldownHours: 8 };
+let draft = { sites: ["youtube.com", "reddit.com", "x.com"], allowanceSeconds: 1800, cooldownHours: 8 };
 let groups = [];
 let selectedGroupId = null;
 const labels = { "youtube.com": "YouTube", "reddit.com": "Reddit", "x.com": "X" };
@@ -8,7 +8,13 @@ const groupTemplates = [
   { id: "video", name: "Video", icon: "▶", sites: ["youtube.com", "tiktok.com", "twitch.tv"] },
   { id: "news", name: "News", icon: "▤", sites: ["reuters.com", "bbc.com", "cnn.com"] }
 ];
-const fmt = (ms) => `${Math.ceil(ms / 60_000)} min`;
+const fmt = (ms) => ms < 60_000 ? `${Math.max(0, Math.ceil(ms / 1000))} sec` : `${Math.ceil(ms / 60_000)} min`;
+const durationLabel = (seconds) => {
+  const minutes = Math.floor(seconds / 60), remainder = seconds % 60;
+  if (minutes && remainder) return `${minutes}m ${remainder}s`;
+  if (minutes) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `${remainder} second${remainder === 1 ? "" : "s"}`;
+};
 const esc = (value) => value.replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
 const brandMarkup = () => `<div class="brand"><img src="assets/logo-a.svg" alt=""><span>Boom<span class="dot">.</span></span></div>`;
 let view = "loading";
@@ -111,7 +117,7 @@ function loadSelectedGroup() {
   const group = groups.find(item => item.id === selectedGroupId) || groups[0];
   if (!group) return;
   selectedGroupId = group.id;
-  draft = { sites: [...group.sites], allowanceMinutes: group.allowanceMinutes, cooldownHours: group.cooldownHours };
+  draft = { sites: [...group.sites], allowanceSeconds: group.allowanceSeconds ?? (group.allowanceMinutes ?? 30) * 60, cooldownHours: group.cooldownHours };
 }
 function hydrateGroups(state) {
   if (Array.isArray(state.groups) && state.groups.length) {
@@ -119,13 +125,13 @@ function hydrateGroups(state) {
       id: group.id,
       name: group.name,
       sites: [...group.sites],
-      allowanceMinutes: group.allowanceMinutes ?? 30,
+      allowanceSeconds: group.allowanceSeconds ?? (group.allowanceMinutes ?? 30) * 60,
       cooldownHours: group.cooldownHours ?? 8
     }));
     selectedGroupId = groups.some(group => group.id === state.selectedGroupId) ? state.selectedGroupId : groups[0].id;
   } else {
     selectedGroupId = "group-default";
-    groups = [{ id: selectedGroupId, name: "Focus group", sites: [...state.sites], allowanceMinutes: state.allowanceMinutes, cooldownHours: state.cooldownHours }];
+    groups = [{ id: selectedGroupId, name: "Focus group", sites: [...state.sites], allowanceSeconds: state.allowanceSeconds ?? state.allowanceMinutes * 60, cooldownHours: state.cooldownHours }];
   }
   loadSelectedGroup();
 }
@@ -134,7 +140,7 @@ function createGroupFromTemplate(template) {
     id: groupId(),
     name: uniqueGroupName(template.name),
     sites: [...template.sites],
-    allowanceMinutes: 30,
+    allowanceSeconds: 1800,
     cooldownHours: 8
   };
   groups.push(group);
@@ -146,12 +152,13 @@ function createGroupFromTemplate(template) {
 }
 
 function persistDraft() {
-  groups = groups.map(group => group.id === selectedGroupId ? { ...group, sites: [...draft.sites], allowanceMinutes: draft.allowanceMinutes, cooldownHours: draft.cooldownHours } : group);
+  groups = groups.map(group => group.id === selectedGroupId ? { ...group, sites: [...draft.sites], allowanceSeconds: draft.allowanceSeconds, cooldownHours: draft.cooldownHours } : group);
   const snapshot = {
     groups: structuredClone(groups),
     selectedGroupId,
     sites: [...draft.sites],
-    allowanceMinutes: draft.allowanceMinutes,
+    allowanceMinutes: Math.floor(draft.allowanceSeconds / 60),
+    allowanceSeconds: draft.allowanceSeconds,
     cooldownHours: draft.cooldownHours
   };
   saveQueue = saveQueue.then(() => chrome.storage.local.set(snapshot));
@@ -172,45 +179,45 @@ function renderStart() {
   const totalCooldownMinutes = Math.max(1, Math.round(draft.cooldownHours * 60));
   const customHours = Math.floor(totalCooldownMinutes / 60);
   const customMinutes = totalCooldownMinutes % 60;
+  const allowanceMinutes = Math.floor(draft.allowanceSeconds / 60);
+  const allowanceRemainder = draft.allowanceSeconds % 60;
+  const group = groups.find(item => item.id === selectedGroupId);
+  const siteSummary = draft.sites.length ? `${esc(labels[draft.sites[0]] || draft.sites[0])}${draft.sites.length > 1 ? ` + ${draft.sites.length - 1} site${draft.sites.length === 2 ? "" : "s"}` : ""}` : "No sites yet";
   app.innerHTML = `${brandMarkup()}
-    <label class="group-switch"><span>Active group</span><select id="group-select">${groups.map(group => `<option value="${esc(group.id)}" ${group.id===selectedGroupId?"selected":""}>${esc(group.name)}</option>`).join("")}</select></label>
-    <h2>Sites in the group</h2><p class="group-copy">One shared allowance for all of them.</p>
-    <div class="site-list">${draft.sites.map(site => `<span class="site-pill"><span>${esc(labels[site] || site)}</span><button class="site-only" data-only="${esc(site)}" aria-label="Use only ${esc(site)}">Only</button><button class="site-remove" data-remove="${esc(site)}" aria-label="Remove ${esc(site)}">×</button></span>`).join("") || `<span class="empty">No sites added yet</span>`}</div>
-    <button class="add-group" id="add">＋ Add sites to group</button>
-    <h2 class="time-title">How much time?</h2>
-    <div class="stepper"><button class="round" id="minus" aria-label="Subtract 5 minutes">−</button><label class="minute-input"><input id="minutes" type="number" min="1" max="1440" step="1" value="${draft.allowanceMinutes}" aria-label="Allowance in minutes"><span>min</span></label><button class="round" id="plus" aria-label="Add 5 minutes">+</button></div>
-    <p class="hint">Shared across all selected sites.</p>
+    <button class="group-summary" id="edit-sites"><span><small>${esc(group?.name || "Focus group")}</small><strong>${siteSummary}</strong></span><span class="edit-label">Edit ›</span></button>
+    <section class="allowance-block"><span class="eyebrow">Allowance</span><div class="stepper"><button class="round" id="minus" aria-label="Subtract 5 minutes">−</button><div class="allowance-value"><strong id="allowance-summary">${allowanceRemainder ? `${allowanceMinutes}:${String(allowanceRemainder).padStart(2,"0")}` : allowanceMinutes}</strong><span id="allowance-unit">${allowanceRemainder ? "" : "min"}</span></div><button class="round" id="plus" aria-label="Add 5 minutes">+</button></div><button class="fine-toggle" id="fine-toggle" aria-expanded="${allowanceRemainder > 0}">☷ Fine tune</button></section>
+    <div class="fine-panel ${allowanceRemainder > 0 ? "visible" : ""}" id="fine-panel"><label><span>Minutes</span><input id="minutes" type="number" min="0" max="1440" value="${allowanceMinutes}"></label><b>:</b><label><span>Seconds</span><input id="seconds" type="number" min="0" max="59" value="${String(allowanceRemainder).padStart(2,"0")}"></label><p id="allowance-error"></p></div>
     <div class="cooldown"><label>Reset becomes available after</label><select id="cooldown">${cooldownPresets.map(n=>`<option value="${n}" ${n===draft.cooldownHours?"selected":""}>${n} hours</option>`).join("")}<option value="custom" ${isCustomCooldown?"selected":""}>Custom…</option></select></div>
     <div class="custom-cooldown ${isCustomCooldown?"visible":""}" id="custom-cooldown"><div class="custom-title"><strong>Custom reset time</strong><span>Choose exactly how long sites stay locked.</span></div><div class="duration-fields"><label><span>Hours</span><input id="custom-hours" type="number" min="0" max="168" step="1" value="${customHours}"></label><label><span>Minutes</span><input id="custom-minutes" type="number" min="0" max="59" step="1" value="${customMinutes}"></label></div><p class="duration-error" id="duration-error"></p></div>
-    <button class="primary" id="start">Start ${draft.allowanceMinutes}-minute allowance</button>
-    <p class="foot">When it reaches 0, these sites lock.</p>`;
-  document.querySelectorAll("[data-remove]").forEach(button => button.onclick = () => changeDraft(() => { draft.sites = draft.sites.filter(site => site !== button.dataset.remove); }));
-  document.querySelectorAll("[data-only]").forEach(button => button.onclick = () => changeDraft(() => { draft.sites = [button.dataset.only]; }));
-  document.querySelector("#group-select").onchange = async event => {
-    await persistDraft();
-    selectedGroupId = event.target.value;
-    loadSelectedGroup();
-    draftRevision += 1;
-    await chrome.storage.local.set({ selectedGroupId });
-    renderStart();
+    <button class="primary" id="start">Start ${durationLabel(draft.allowanceSeconds)} allowance</button>
+    <p class="foot">The group locks when focused browsing reaches zero.</p>`;
+  document.querySelector("#edit-sites").onclick = renderAddSites;
+  document.querySelector("#minus").onclick = () => changeDraft(() => { draft.allowanceSeconds = Math.max(5, draft.allowanceSeconds - 300); });
+  document.querySelector("#plus").onclick = () => changeDraft(() => { draft.allowanceSeconds = Math.min(86400, draft.allowanceSeconds + 300); });
+  const finePanel = document.querySelector("#fine-panel");
+  document.querySelector("#fine-toggle").onclick = event => {
+    finePanel.classList.toggle("visible");
+    event.currentTarget.setAttribute("aria-expanded", finePanel.classList.contains("visible"));
   };
-  document.querySelector("#add").onclick = renderAddSites;
-  document.querySelector("#minus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.max(1, draft.allowanceMinutes - 5); });
-  document.querySelector("#plus").onclick = () => changeDraft(() => { draft.allowanceMinutes = Math.min(1440, draft.allowanceMinutes + 5); });
   const minutesInput = document.querySelector("#minutes");
-  const commitMinutes = () => {
-    const parsed = Number.parseInt(minutesInput.value, 10);
-    if (!Number.isFinite(parsed)) { minutesInput.value = draft.allowanceMinutes; return; }
-    const next = Math.min(1440, Math.max(1, parsed));
-    draft.allowanceMinutes = next;
-    minutesInput.value = next;
-    document.querySelector("#start").textContent = `Start ${next}-minute allowance`;
+  const secondsInput = document.querySelector("#seconds");
+  const commitAllowance = () => {
+    const minutes = Math.min(1440, Math.max(0, Number.parseInt(minutesInput.value || "0", 10)));
+    const seconds = Math.min(59, Math.max(0, Number.parseInt(secondsInput.value || "0", 10)));
+    const total = minutes * 60 + seconds;
+    if (total < 5) { document.querySelector("#allowance-error").textContent = "Minimum allowance is 5 seconds."; return; }
+    document.querySelector("#allowance-error").textContent = "";
+    draft.allowanceSeconds = total;
+    minutesInput.value = minutes;
+    secondsInput.value = String(seconds).padStart(2, "0");
+    document.querySelector("#allowance-summary").textContent = seconds ? `${minutes}:${String(seconds).padStart(2,"0")}` : minutes;
+    document.querySelector("#allowance-unit").textContent = seconds ? "" : "min";
+    document.querySelector("#start").textContent = `Start ${durationLabel(total)} allowance`;
     draftRevision += 1;
     void persistDraft();
   };
-  minutesInput.onchange = commitMinutes;
-  minutesInput.onblur = commitMinutes;
-  minutesInput.onkeydown = event => { if (event.key === "Enter") { commitMinutes(); minutesInput.blur(); } };
+  minutesInput.onchange = commitAllowance;
+  secondsInput.onchange = commitAllowance;
   const cooldownSelect = document.querySelector("#cooldown");
   const customPanel = document.querySelector("#custom-cooldown");
   cooldownSelect.onchange = event => {
@@ -244,7 +251,7 @@ function renderStart() {
   document.querySelector("#custom-minutes").onchange = commitCustomCooldown;
   document.querySelector("#start").onclick = async () => {
     if (!draft.sites.length) return alert("Add at least one site to the group.");
-    await chrome.runtime.sendMessage({ type: "start", ...draft });
+    await chrome.runtime.sendMessage({ type: "start", ...draft, allowanceMinutes: Math.floor(draft.allowanceSeconds / 60) });
     refresh();
   };
 }
@@ -252,8 +259,10 @@ function renderStart() {
 function renderAddSites() {
   view = "add-sites";
   app.innerHTML = `<button class="back" id="back">←</button>
-    <div class="brand small">Add sites</div>
-    <p class="add-intro">Choose how you want to add a site to this group.</p>
+    <div class="brand small">Edit sites</div>
+    <label class="group-switch"><span>Group</span><select id="group-select">${groups.map(group => `<option value="${esc(group.id)}" ${group.id===selectedGroupId?"selected":""}>${esc(group.name)}</option>`).join("")}</select></label>
+    <div class="edit-site-list">${draft.sites.map(site => `<div class="edit-site-row"><span><strong>${esc(labels[site] || site)}</strong><small>${esc(site)}</small></span><button class="site-only" data-only="${esc(site)}">Only</button><button class="site-remove" data-remove="${esc(site)}" aria-label="Remove ${esc(site)}">×</button></div>`).join("") || `<span class="empty">No sites added yet</span>`}</div>
+    <p class="add-intro">Add another site to this group.</p>
     <section class="template-section"><div class="template-heading"><strong>Create a template group</strong><span>Start a new group with common sites.</span></div><div class="template-grid">${groupTemplates.map(template => `<button class="template-card" data-template="${template.id}"><span>${template.icon}</span><strong>${template.name}</strong><small>${template.sites.length} sites</small></button>`).join("")}</div></section>
     <div class="or"><span>add to ${esc(groups.find(group => group.id === selectedGroupId)?.name || "this group")}</span></div>
     <button class="choice" id="current"><span class="choice-icon">◎</span><span><strong>Add current site</strong><small>Use the website open in this tab</small></span><span>›</span></button>
@@ -262,6 +271,16 @@ function renderAddSites() {
     <form class="manual" id="manual"><label for="website">Enter a website</label><div class="input-row"><input id="website" type="text" inputmode="url" placeholder="example.com" autocomplete="off"><button type="submit">Add</button></div><p class="error" id="error" role="alert"></p></form>
     <div class="current-group">${draft.sites.length} site${draft.sites.length === 1 ? "" : "s"} currently in this group</div>`;
   document.querySelector("#back").onclick = renderStart;
+  document.querySelector("#group-select").onchange = async event => {
+    await persistDraft();
+    selectedGroupId = event.target.value;
+    loadSelectedGroup();
+    draftRevision += 1;
+    await chrome.storage.local.set({ selectedGroupId });
+    renderAddSites();
+  };
+  document.querySelectorAll("[data-remove]").forEach(button => button.onclick = async () => { draft.sites = draft.sites.filter(site => site !== button.dataset.remove); draftRevision += 1; await persistDraft(); renderAddSites(); });
+  document.querySelectorAll("[data-only]").forEach(button => button.onclick = async () => { draft.sites = [button.dataset.only]; draftRevision += 1; await persistDraft(); renderAddSites(); });
   document.querySelectorAll("[data-template]").forEach(button => button.onclick = () => {
     const template = groupTemplates.find(item => item.id === button.dataset.template);
     if (template) createGroupFromTemplate(template);
