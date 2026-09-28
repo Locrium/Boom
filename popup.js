@@ -15,24 +15,71 @@ let view = "loading";
 let draftRevision = 0;
 let saveQueue = Promise.resolve();
 let themeMode = "system";
+let allowEarlyUnlock = true;
 
 function applyTheme(mode) {
   themeMode = ["system", "light", "dark"].includes(mode) ? mode : "system";
   if (themeMode === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.dataset.theme = themeMode;
-  document.querySelector("#theme-icon").textContent = themeMode === "light" ? "☀" : themeMode === "dark" ? "☾" : "◐";
   document.querySelectorAll("[data-theme-choice]").forEach(button => button.classList.toggle("selected", button.dataset.themeChoice === themeMode));
 }
 
 chrome.storage.local.get({ themeMode: "system" }).then(({ themeMode: savedTheme }) => applyTheme(savedTheme));
-document.querySelector("#theme-trigger").onclick = () => document.querySelector("#theme-dialog").showModal();
-document.querySelector("#theme-close").onclick = () => document.querySelector("#theme-dialog").close();
-document.querySelector("#theme-dialog").onclick = (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); };
+chrome.storage.local.get({ allowEarlyUnlock: true }).then(({ allowEarlyUnlock: saved }) => {
+  allowEarlyUnlock = saved;
+  document.querySelector("#allow-early-unlock").checked = saved;
+});
+document.querySelector("#settings-trigger").onclick = () => {
+  const group = groups.find(item => item.id === selectedGroupId);
+  document.querySelector("#group-name-setting").value = group?.name || "";
+  document.querySelector("#delete-group").disabled = groups.length <= 1;
+  document.querySelector("#allow-early-unlock").checked = allowEarlyUnlock;
+  document.querySelector("#settings-dialog").showModal();
+};
+document.querySelector("#settings-close").onclick = () => document.querySelector("#settings-dialog").close();
+document.querySelector("#settings-dialog").onclick = (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); };
 document.querySelectorAll("[data-theme-choice]").forEach(button => button.onclick = async () => {
   applyTheme(button.dataset.themeChoice);
   await chrome.storage.local.set({ themeMode });
-  document.querySelector("#theme-dialog").close();
 });
+document.querySelector("#allow-early-unlock").onchange = async event => {
+  allowEarlyUnlock = event.target.checked;
+  await chrome.storage.local.set({ allowEarlyUnlock });
+};
+document.querySelector("#save-group-name").onclick = async () => {
+  const input = document.querySelector("#group-name-setting");
+  const name = input.value.trim().slice(0, 40);
+  if (!name) { input.focus(); return; }
+  groups = groups.map(group => group.id === selectedGroupId ? { ...group, name } : group);
+  draftRevision += 1;
+  await persistDraft();
+  renderStart();
+};
+document.querySelector("#duplicate-group").onclick = async () => {
+  await persistDraft();
+  const source = groups.find(group => group.id === selectedGroupId);
+  if (!source) return;
+  const duplicate = { ...structuredClone(source), id: groupId(), name: uniqueGroupName(`${source.name} copy`) };
+  groups.push(duplicate);
+  selectedGroupId = duplicate.id;
+  loadSelectedGroup();
+  draftRevision += 1;
+  await persistDraft();
+  document.querySelector("#settings-dialog").close();
+  renderStart();
+};
+document.querySelector("#delete-group").onclick = async () => {
+  if (groups.length <= 1) return;
+  const group = groups.find(item => item.id === selectedGroupId);
+  if (!confirm(`Delete “${group?.name || "this group"}”?`)) return;
+  groups = groups.filter(item => item.id !== selectedGroupId);
+  selectedGroupId = groups[0].id;
+  loadSelectedGroup();
+  draftRevision += 1;
+  await persistDraft();
+  document.querySelector("#settings-dialog").close();
+  renderStart();
+};
 
 function normalizeSite(value) {
   const raw = value.trim().toLowerCase();
@@ -246,7 +293,7 @@ function renderAddSites() {
 
 function showError(message) { document.querySelector("#error").textContent = message; }
 function renderActive(state) { view = "active"; app.innerHTML = `${brandMarkup()}<div class="active"><p>Shared allowance for ${state.sites.map(site => esc(labels[site] || site)).join(", ")}</p><div class="ring"><strong>${fmt(state.remainingMs)}</strong><span>left</span></div><h2 class="center">Stay intentional.</h2><p class="status">Your selected sites lock when the timer reaches zero.</p></div>`; }
-function renderLocked(state) { view = "locked"; const left=Math.max(0,state.lockedUntil-Date.now()); const hours=Math.floor(left/3_600_000), mins=Math.ceil((left%3_600_000)/60_000); app.innerHTML=`${brandMarkup()}<div class="locked"><img class="locked-mark" src="assets/logo-a.svg" alt=""><h2>Time’s up.</h2><p>Your sites are locked.</p><p>Reset becomes available when the cooldown ends.</p><button class="disabled" disabled>Reactivate in ${hours}h ${mins}m</button></div>`; }
+function renderLocked(state) { view = "locked"; allowEarlyUnlock = state.allowEarlyUnlock !== false; const left=Math.max(0,state.lockedUntil-Date.now()); const hours=Math.floor(left/3_600_000), mins=Math.ceil((left%3_600_000)/60_000); app.innerHTML=`${brandMarkup()}<div class="locked"><img class="locked-mark" src="assets/logo-a.svg" alt=""><h2>Time’s up.</h2><p>Your sites are locked.</p><p>Reset becomes available when the cooldown ends.</p><div class="disabled">Resets in ${hours}h ${mins}m</div>${allowEarlyUnlock?`<button class="unlock-now" id="unlock-now">Unlock now</button>`:""}</div>`; if(allowEarlyUnlock) document.querySelector("#unlock-now").onclick=async()=>{const next=await chrome.runtime.sendMessage({type:"unlockNow"}); if(!next.error) await refresh();}; }
 async function refresh() {
   const revisionAtRequest = draftRevision;
   const state = await chrome.runtime.sendMessage({ type: "state" });

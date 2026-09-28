@@ -1,16 +1,21 @@
-const RULE_ID_BASE = 7100;
+const BLOCK_RULE_ID = 7100;
 const UNLOCK_ALARM = "unlock";
-const HEARTBEAT_SCRIPT = "boom-limited-sites-heartbeat";
+const BUDGET_ALARM = "budget-expiry";
+
 const DEFAULT_STATE = {
   sites: ["youtube.com", "reddit.com", "x.com"],
   groups: null,
   selectedGroupId: null,
   allowanceMinutes: 30,
   cooldownHours: 8,
+  allowEarlyUnlock: true,
   startedAt: null,
   usedMs: 0,
   isLocked: false,
-  lockedUntil: null,
+  lockedUntil: null
+};
+
+const DEFAULT_RUNTIME = {
   activeTabId: null,
   activeSince: null,
   windowFocused: true
@@ -25,6 +30,8 @@ function enqueue(work) {
 
 const read = async () => ({ ...DEFAULT_STATE, ...(await chrome.storage.local.get(DEFAULT_STATE)) });
 const save = (data) => chrome.storage.local.set(data);
+const readRuntime = async () => ({ ...DEFAULT_RUNTIME, ...(await chrome.storage.session.get(DEFAULT_RUNTIME)) });
+const saveRuntime = (data) => chrome.storage.session.set(data);
 
 function hostFor(url) {
   try { return new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { return null; }
@@ -41,49 +48,33 @@ function remainingMs(state) {
 
 async function updateRules(state) {
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
+  // Remove both the consolidated rule and any per-site rules left by older builds.
   const removeRuleIds = existing
-    .filter((rule) => rule.id >= RULE_ID_BASE && rule.id < RULE_ID_BASE + 1000)
+    .filter((rule) => rule.id >= BLOCK_RULE_ID && rule.id < BLOCK_RULE_ID + 1000)
     .map((rule) => rule.id);
-  const addRules = state.isLocked ? state.sites.slice(0, 1000).map((site, index) => ({
-    id: RULE_ID_BASE + index,
+  const addRules = state.isLocked && state.sites.length ? [{
+    id: BLOCK_RULE_ID,
     priority: 1,
     action: { type: "redirect", redirect: { extensionPath: "/locked.html" } },
-    condition: { requestDomains: [site], resourceTypes: ["main_frame"] }
-  })) : [];
+    condition: { requestDomains: [...new Set(state.sites)].slice(0, 1000), resourceTypes: ["main_frame"] }
+  }] : [];
   await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
 }
 
-async function syncHeartbeatScript(sites = []) {
-  await chrome.scripting.unregisterContentScripts({ ids: [HEARTBEAT_SCRIPT] }).catch(() => null);
-  if (!sites.length) return;
-  const matches = [...new Set(sites.map((site) => `*://*.${site}/*`))];
-  await chrome.scripting.registerContentScripts([{
-    id: HEARTBEAT_SCRIPT,
-    matches,
-    js: ["heartbeat.js"],
-    runAt: "document_start",
-    persistAcrossSessions: true
-  }]);
-}
-
-async function ensureHeartbeatInTab(tab) {
-  if (!tab?.id || !tab.url || !isLimited(tab.url, (await read()).sites)) return;
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["heartbeat.js"] }).catch(() => null);
+async function scheduleBudgetExpiry(state, runtime) {
+  await chrome.alarms.clear(BUDGET_ALARM);
+  if (!state.startedAt || state.isLocked || !runtime.activeSince || !runtime.windowFocused) return;
+  const left = remainingMs(state);
+  if (left > 0) chrome.alarms.create(BUDGET_ALARM, { when: Date.now() + left });
 }
 
 async function unlock(state) {
-  const next = {
-    ...state,
-    isLocked: false,
-    lockedUntil: null,
-    usedMs: 0,
-    startedAt: null,
-    activeSince: null
-  };
+  const next = { ...state, isLocked: false, lockedUntil: null, usedMs: 0, startedAt: null };
   await save(next);
+  await saveRuntime(DEFAULT_RUNTIME);
   await updateRules(next);
   await chrome.alarms.clear(UNLOCK_ALARM);
-  await syncHeartbeatScript();
+  await chrome.alarms.clear(BUDGET_ALARM);
   return next;
 }
 
@@ -101,16 +92,11 @@ async function redirectLimitedTabs(state) {
 
 async function lock(state) {
   const lockedUntil = Date.now() + state.cooldownHours * 3_600_000;
-  const next = {
-    ...state,
-    usedMs: state.allowanceMinutes * 60_000,
-    isLocked: true,
-    lockedUntil,
-    activeSince: null
-  };
+  const next = { ...state, usedMs: state.allowanceMinutes * 60_000, isLocked: true, lockedUntil };
   await save(next);
+  await saveRuntime({ activeTabId: null, activeSince: null, windowFocused: true });
+  await chrome.alarms.clear(BUDGET_ALARM);
   await updateRules(next);
-  await syncHeartbeatScript();
   chrome.alarms.create(UNLOCK_ALARM, { when: lockedUntil });
   await redirectLimitedTabs(next);
   return next;
@@ -118,42 +104,48 @@ async function lock(state) {
 
 async function consume(state) {
   state = await reconcileExpiry(state);
-  if (!state.startedAt || state.isLocked || !state.activeSince || !state.windowFocused) return state;
-  const tab = await chrome.tabs.get(state.activeTabId).catch(() => null);
-  if (!tab || !isLimited(tab.url, state.sites)) {
-    const next = { ...state, activeSince: null };
-    await save(next);
-    return next;
-  }
-  const elapsed = Math.max(0, Date.now() - state.activeSince);
-  if (!elapsed) return state;
-  const next = { ...state, usedMs: state.usedMs + elapsed, activeSince: Date.now() };
+  const runtime = await readRuntime();
+  if (!state.startedAt || state.isLocked || !runtime.activeSince || !runtime.windowFocused) return state;
+  // activeSince is only set while a limited page is focused. Do not inspect the
+  // current URL here: during navigation it has already changed, but the elapsed
+  // time still belongs to the page that was active before the transition.
+  const elapsed = Math.max(0, Date.now() - runtime.activeSince);
+  const next = { ...state, usedMs: state.usedMs + elapsed };
   if (remainingMs(next) <= 0) return lock(next);
+  const nextRuntime = { ...runtime, activeSince: Date.now() };
   await save(next);
+  await saveRuntime(nextRuntime);
+  await scheduleBudgetExpiry(next, nextRuntime);
   return next;
 }
 
 async function setActiveTab(tabId) {
   let state = await consume(await read());
+  const runtime = await readRuntime();
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const activeSince = state.startedAt && !state.isLocked && state.windowFocused && tab && isLimited(tab.url, state.sites)
+  const activeSince = state.startedAt && !state.isLocked && runtime.windowFocused && tab && isLimited(tab.url, state.sites)
     ? Date.now()
     : null;
-  state = { ...state, activeTabId: tabId, activeSince };
-  await save(state);
-  if (activeSince) await ensureHeartbeatInTab(tab);
+  const nextRuntime = { ...runtime, activeTabId: tabId, activeSince };
+  await saveRuntime(nextRuntime);
+  await scheduleBudgetExpiry(state, nextRuntime);
   return state;
 }
 
 async function restoreRuntime() {
   let state = await reconcileExpiry(await read());
   await updateRules(state);
+  await chrome.alarms.clear(BUDGET_ALARM);
   if (state.isLocked) {
     chrome.alarms.create(UNLOCK_ALARM, { when: state.lockedUntil });
+    await saveRuntime(DEFAULT_RUNTIME);
   } else if (state.startedAt) {
-    await syncHeartbeatScript(state.sites);
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const runtime = { activeTabId: tab?.id ?? null, activeSince: tab && isLimited(tab.url, state.sites) ? Date.now() : null, windowFocused: true };
+    await saveRuntime(runtime);
+    await scheduleBudgetExpiry(state, runtime);
   } else {
-    await syncHeartbeatScript();
+    await saveRuntime(DEFAULT_RUNTIME);
   }
   return state;
 }
@@ -168,7 +160,8 @@ chrome.runtime.onStartup.addListener(() => enqueue(restoreRuntime));
 chrome.tabs.onActivated.addListener(({ tabId }) => enqueue(() => setActiveTab(tabId)));
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => enqueue(async () => {
   let state = await reconcileExpiry(await read());
-  if (tabId === state.activeTabId && changeInfo.url) state = await setActiveTab(tabId);
+  const runtime = await readRuntime();
+  if (tabId === runtime.activeTabId && changeInfo.url) state = await setActiveTab(tabId);
   if (state.isLocked && isLimited(tab.url, state.sites)) {
     await chrome.tabs.update(tabId, { url: chrome.runtime.getURL("locked.html") });
   }
@@ -176,26 +169,32 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => enqueue(async () =
 
 chrome.windows.onFocusChanged.addListener((windowId) => enqueue(async () => {
   let state = await consume(await read());
+  const runtime = await readRuntime();
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    await save({ ...state, windowFocused: false, activeSince: null });
+    const nextRuntime = { ...runtime, windowFocused: false, activeSince: null };
+    await saveRuntime(nextRuntime);
+    await scheduleBudgetExpiry(state, nextRuntime);
     return;
   }
   const [tab] = await chrome.tabs.query({ active: true, windowId });
-  const activeSince = tab && state.startedAt && !state.isLocked && isLimited(tab.url, state.sites) ? Date.now() : null;
-  await save({ ...state, windowFocused: true, activeTabId: tab?.id ?? null, activeSince });
+  const nextRuntime = {
+    windowFocused: true,
+    activeTabId: tab?.id ?? null,
+    activeSince: tab && state.startedAt && !state.isLocked && isLimited(tab.url, state.sites) ? Date.now() : null
+  };
+  await saveRuntime(nextRuntime);
+  await scheduleBudgetExpiry(state, nextRuntime);
 }));
 
 chrome.alarms.onAlarm.addListener((alarm) => enqueue(async () => {
-  let state = await read();
-  if (alarm.name === UNLOCK_ALARM) {
-    await reconcileExpiry(state);
-  }
+  if (alarm.name === UNLOCK_ALARM) await reconcileExpiry(await read());
+  if (alarm.name === BUDGET_ALARM) await consume(await read());
 }));
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   enqueue(async () => {
     let state = await reconcileExpiry(await read());
-    if (message.type === "heartbeat" && sender.tab?.id === state.activeTabId) {
+    if (message.type === "state") {
       state = await consume(state);
     } else if (message.type === "start") {
       state = {
@@ -210,12 +209,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       };
       await updateRules(state);
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      state.activeTabId = tab?.id ?? null;
-      state.activeSince = tab && isLimited(tab.url, state.sites) ? Date.now() : null;
+      const runtime = {
+        activeTabId: tab?.id ?? null,
+        activeSince: tab && isLimited(tab.url, state.sites) ? Date.now() : null,
+        windowFocused: true
+      };
       await save(state);
-      await syncHeartbeatScript(state.sites);
-      const limitedTabs = (await chrome.tabs.query({})).filter((openTab) => isLimited(openTab.url, state.sites));
-      await Promise.all(limitedTabs.map(ensureHeartbeatInTab));
+      await saveRuntime(runtime);
+      await scheduleBudgetExpiry(state, runtime);
+    } else if (message.type === "unlockNow" && state.isLocked && state.allowEarlyUnlock) {
+      state = await unlock(state);
     }
     sendResponse({ ...state, remainingMs: remainingMs(state) });
   }).catch((error) => sendResponse({ error: error.message }));

@@ -1,1 +1,20 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Boom — Locked</title><style>:root{color-scheme:light dark;--background:#fff8f4;--text:#101b3d;--muted:#687087}:root[data-theme="dark"]{color-scheme:dark;--background:#17191e;--text:#f4f4f5;--muted:#9da2ac}:root[data-theme="light"]{color-scheme:light}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--background);color:var(--text);font:18px system-ui;text-align:center}.card{max-width:430px;padding:45px}.mark{width:88px;height:88px}h1{font-size:38px;margin:14px}p{color:var(--muted);line-height:1.55}@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--background:#17191e;--text:#f4f4f5;--muted:#9da2ac}}</style></head><body><main class="card"><img class="mark" src="assets/logo-a.svg" alt="Boom timer stopped"><h1>Time’s up.</h1><p>This site is part of your Boom allowance. Take a real break; it will become available when your cooldown ends.</p></main><script src="locked.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title>Boom — Locked</title>
+  <style>
+    :root{color-scheme:light dark;--background:#f7f7f8;--text:#202124;--muted:#70737a;--surface:#fff;--line:#d9dade;--orange:#ff5525}
+    :root[data-theme="dark"]{color-scheme:dark;--background:#18191b;--text:#f2f2f3;--muted:#a0a2a7;--surface:#222326;--line:#3a3b40}
+    :root[data-theme="light"]{color-scheme:light}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--background);color:var(--text);font:18px system-ui;text-align:center}
+    .card{max-width:430px;padding:45px}.mark{width:88px;height:88px}h1{font-size:38px;margin:14px}p{color:var(--muted);line-height:1.55}
+    #reset-time{font-weight:700;color:var(--text)}
+    #unlock-now{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--text);padding:12px 22px;font-weight:750;cursor:pointer}
+    #unlock-now:hover{border-color:var(--orange)}
+    @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--background:#18191b;--text:#f2f2f3;--muted:#a0a2a7;--surface:#222326;--line:#3a3b40}}
+  </style>
+</head>
+<body><main class="card"><img class="mark" src="assets/logo-a.svg" alt="Boom timer stopped"><h1>Time’s up.</h1><p>This site is part of your Boom allowance. Take a real break; it will become available when your cooldown ends.</p><p id="reset-time"></p><button id="unlock-now" hidden>Unlock now</button></main><script src="locked.js"></script></body>
+</html>

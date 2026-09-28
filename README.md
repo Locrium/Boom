@@ -20,4 +20,4 @@ This is intentionally not a daily-budget or scheduling product. Each session beg
 
 ## Validate behavior
 
-Run `node tests/background.test.cjs`. The test covers allowance consumption on the active tab, blocking-rule installation, immediate redirection, cooldown expiry, blocking-rule removal, and ignored heartbeats from inactive tabs.
+Run `node tests/background.test.cjs`. The test covers event-driven allowance timing, focus changes, consolidated blocking-rule installation, immediate redirection, optional early unlock, cooldown expiry, and blocking-rule removal.

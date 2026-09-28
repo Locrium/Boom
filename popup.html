@@ -1,1 +1,17 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><link rel="stylesheet" href="popup.css"><title>Boom</title></head><body><button class="theme-trigger" id="theme-trigger" aria-label="Choose appearance" title="Appearance"><span id="theme-icon">◐</span></button><dialog class="theme-dialog" id="theme-dialog"><div class="dialog-head"><div><strong>Appearance</strong><span>Choose how Boom looks.</span></div><button id="theme-close" aria-label="Close">×</button></div><div class="theme-options"><button data-theme-choice="system"><span class="theme-glyph">◐</span><span><strong>System</strong><small>Match your device</small></span><span class="theme-check">✓</span></button><button data-theme-choice="light"><span class="theme-glyph">☀</span><span><strong>Light</strong><small>Always use light mode</small></span><span class="theme-check">✓</span></button><button data-theme-choice="dark"><span class="theme-glyph">☾</span><span><strong>Dark</strong><small>Always use dark mode</small></span><span class="theme-check">✓</span></button></div></dialog><main id="app"></main><script src="popup.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><link rel="stylesheet" href="popup.css"><title>Boom</title></head>
+<body>
+<button class="settings-trigger" id="settings-trigger" aria-label="Open settings" title="Settings">🔧</button>
+<dialog class="settings-dialog" id="settings-dialog">
+  <div class="dialog-head"><div><strong>Settings</strong><span>Appearance and active group.</span></div><button id="settings-close" aria-label="Close">×</button></div>
+  <section class="settings-section"><h3>Appearance</h3><div class="theme-options">
+    <button data-theme-choice="system"><span class="theme-glyph">◐</span><span><strong>System</strong><small>Match your device</small></span><span class="theme-check">✓</span></button>
+    <button data-theme-choice="light"><span class="theme-glyph">☀</span><span><strong>Light</strong><small>Always use light mode</small></span><span class="theme-check">✓</span></button>
+    <button data-theme-choice="dark"><span class="theme-glyph">☾</span><span><strong>Dark</strong><small>Always use dark mode</small></span><span class="theme-check">✓</span></button>
+  </div></section>
+  <section class="settings-section"><h3>Locked screen</h3><label class="setting-toggle"><span><strong>Allow “Unlock now”</strong><small>Show an escape button during the cooldown.</small></span><input id="allow-early-unlock" type="checkbox"></label></section>
+  <section class="settings-section group-settings"><h3>Active group</h3><label for="group-name-setting">Group name</label><div class="settings-input-row"><input id="group-name-setting" type="text" maxlength="40"><button id="save-group-name">Save</button></div><div class="group-action-row"><button id="duplicate-group">Duplicate</button><button class="danger" id="delete-group">Delete</button></div></section>
+</dialog>
+<main id="app"></main><script src="popup.js"></script>
+</body></html>

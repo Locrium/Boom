@@ -3,10 +3,10 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 let now = 1_000_000;
-let storage = {};
+let localStorage = {};
+let sessionStorage = {};
 let rules = [];
 const alarms = new Map();
-const registeredScripts = new Map();
 const tabs = new Map([
   [1, { id: 1, active: true, windowId: 1, url: "https://youtube.com/watch?v=test" }],
   [2, { id: 2, active: false, windowId: 1, url: "https://example.com" }]
@@ -14,24 +14,29 @@ const tabs = new Map([
 const listeners = {};
 const event = (name) => ({ addListener(fn) { listeners[name] = fn; } });
 
-const chrome = {
-  storage: { local: {
+function storageArea(which) {
+  return {
     async get(keys) {
-      if (typeof keys === "string") return storage[keys] === undefined ? {} : { [keys]: storage[keys] };
-      return Object.fromEntries(Object.entries(keys).map(([key, fallback]) => [key, storage[key] === undefined ? fallback : storage[key]]));
+      const source = which();
+      if (typeof keys === "string") return source[keys] === undefined ? {} : { [keys]: source[keys] };
+      return Object.fromEntries(Object.entries(keys).map(([key, fallback]) => [key, source[key] === undefined ? fallback : source[key]]));
     },
-    async set(value) { storage = { ...storage, ...structuredClone(value) }; }
-  } },
+    async set(value) {
+      if (which === getLocal) localStorage = { ...localStorage, ...structuredClone(value) };
+      else sessionStorage = { ...sessionStorage, ...structuredClone(value) };
+    }
+  };
+}
+const getLocal = () => localStorage;
+const getSession = () => sessionStorage;
+
+const chrome = {
+  storage: { local: storageArea(getLocal), session: storageArea(getSession) },
   declarativeNetRequest: {
     async getDynamicRules() { return structuredClone(rules); },
     async updateDynamicRules({ removeRuleIds = [], addRules = [] }) {
       rules = rules.filter((rule) => !removeRuleIds.includes(rule.id)).concat(structuredClone(addRules));
     }
-  },
-  scripting: {
-    async unregisterContentScripts({ ids }) { ids.forEach((id) => registeredScripts.delete(id)); },
-    async registerContentScripts(scripts) { scripts.forEach((script) => registeredScripts.set(script.id, structuredClone(script))); },
-    async executeScript() {}
   },
   alarms: {
     create(name, info) { alarms.set(name, structuredClone(info)); },
@@ -70,44 +75,54 @@ function message(payload, sender = {}) {
 
 (async () => {
   await listeners.installed();
-  let state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 2 });
+  let state = await message({ type: "start", sites: ["youtube.com", "reddit.com"], allowanceMinutes: 1, cooldownHours: 2 });
   assert.equal(state.remainingMs, 60_000, "allowance starts with the requested time");
-  assert.equal(registeredScripts.has("boom-limited-sites-heartbeat"), true, "heartbeat is registered for limited sites");
-  assert.deepEqual(registeredScripts.get("boom-limited-sites-heartbeat").matches, ["*://*.youtube.com/*"]);
+  assert.equal(alarms.get("budget-expiry").when, now + 60_000, "one expiry alarm replaces heartbeat polling");
+  assert.equal(rules.length, 0, "sites remain available before the allowance expires");
 
+  now += 30_000;
+  tabs.get(1).active = false;
+  tabs.get(2).active = true;
+  await listeners.activated({ tabId: 2 });
+  state = await message({ type: "state" });
+  assert.equal(state.remainingMs, 30_000, "only focused time on a limited site is consumed");
+  assert.equal(alarms.has("budget-expiry"), false, "expiry alarm is cleared on an unlimited site");
+
+  now += 45_000;
+  state = await message({ type: "state" });
+  assert.equal(state.remainingMs, 30_000, "time on an unlimited site is not consumed");
+
+  tabs.get(2).active = false;
+  tabs.set(1, { id: 1, active: true, windowId: 1, url: "https://youtube.com" });
+  await listeners.activated({ tabId: 1 });
+  assert.equal(alarms.get("budget-expiry").when, now + 30_000, "remaining budget is scheduled when focus returns");
+  now += 30_001;
+  await listeners.alarm({ name: "budget-expiry" });
+  state = await message({ type: "state" });
+  assert.equal(state.isLocked, true, "group locks when its event-driven expiry alarm fires");
+  assert.equal(rules.length, 1, "one browser rule blocks the whole group");
+  assert.deepEqual(rules[0].condition.requestDomains, ["youtube.com", "reddit.com"]);
+  assert.equal(tabs.get(1).url, "chrome-extension://boom/locked.html", "an open limited tab is redirected immediately");
+  assert.equal(alarms.has("unlock"), true, "cooldown unlock is scheduled");
+
+  state = await message({ type: "unlockNow" });
+  assert.equal(state.isLocked, false, "optional escape action unlocks immediately");
+  assert.equal(rules.length, 0, "immediate unlock removes the blocking rule");
+
+  await chrome.storage.local.set({ allowEarlyUnlock: false });
+  tabs.set(1, { id: 1, active: true, windowId: 1, url: "https://youtube.com" });
+  state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 0.025 });
   now += 60_001;
-  state = await message({ type: "heartbeat" }, { tab: { id: 1 } });
-  assert.equal(state.isLocked, true, "group locks when active usage reaches the allowance");
-  assert.equal(rules.length, 1, "a browser blocking rule is installed");
-  assert.equal(rules[0].condition.requestDomains[0], "youtube.com");
-  assert.equal(tabs.get(1).url, "chrome-extension://boom/locked.html", "an already-open limited tab is redirected immediately");
-  assert.equal(alarms.has("unlock"), true, "unlock is scheduled for the cooldown end");
+  await listeners.alarm({ name: "budget-expiry" });
+  state = await message({ type: "unlockNow" });
+  assert.equal(state.isLocked, true, "immediate unlock is rejected when disabled");
+  assert.equal(state.lockedUntil, now + 90_000, "custom cooldown duration is exact");
 
   now = state.lockedUntil + 1;
   state = await message({ type: "state" });
-  assert.equal(state.isLocked, false, "expired cooldown is reconciled even if the alarm was missed");
-  assert.equal(state.startedAt, null, "a new allowance can be started after cooldown");
-  assert.equal(rules.length, 0, "blocking rules are removed after cooldown");
-  assert.equal(alarms.has("unlock"), false, "stale unlock alarm is cleared");
-  assert.equal(registeredScripts.size, 0, "heartbeat script is removed after the cooldown");
+  assert.equal(state.isLocked, false, "missed cooldown alarms are reconciled");
+  assert.equal(state.startedAt, null, "a new allowance can start after cooldown");
+  assert.equal(rules.length, 0, "blocking rule is removed after cooldown");
 
-  tabs.set(1, { id: 1, active: true, windowId: 1, url: "https://youtube.com" });
-  state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 1 });
-  now += 30_000;
-  state = await message({ type: "heartbeat" }, { tab: { id: 2 } });
-  assert.equal(state.remainingMs, 60_000, "heartbeats from inactive tabs do not consume time");
-  state = await message({ type: "heartbeat" }, { tab: { id: 1 } });
-  assert.equal(state.remainingMs, 30_000, "only the active limited tab consumes time");
-
-  state = await message({ type: "start", sites: ["youtube.com"], allowanceMinutes: 1, cooldownHours: 0.025 });
-  now += 60_001;
-  state = await message({ type: "heartbeat" }, { tab: { id: 1 } });
-  assert.equal(state.isLocked, true, "a custom cooldown session still locks normally");
-  assert.equal(state.lockedUntil, now + 90_000, "a 1 minute 30 second custom cooldown is scheduled exactly");
-  now += 90_001;
-  state = await message({ type: "state" });
-  assert.equal(state.isLocked, false, "a custom cooldown unlocks when its exact duration passes");
-  assert.equal(rules.length, 0, "custom cooldown removes blocking rules when complete");
-
-  console.log("PASS: allowance, blocking, preset/custom cooldown unlock, and active-tab accounting");
+  console.log("PASS: event-driven timing, focused usage, blocking, cooldown, and optional early unlock");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
